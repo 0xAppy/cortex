@@ -1,40 +1,24 @@
-# =========================
-# Imports
-# =========================
-
 from pathlib import Path
 import chromadb
 from sentence_transformers import SentenceTransformer
 
 
-# =========================
-# Configuration
-# =========================
-
+## Configuration
 RAW_DIR = Path("data/raw")
 
 
-# =========================
-# Models & Database
-# =========================
-
+## Models & Database
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 chroma_client = chromadb.PersistentClient(path="data/chroma")
 collection = chroma_client.get_or_create_collection(name="cortex_kb")
 
 
-# =========================
-# Find Documents
-# =========================
-
+## Find Documents
 files = list(RAW_DIR.glob("*.md"))
 
 
-# =========================
-# Chunking
-# =========================
-
+## Chunking
 def chunk_text(text, chunk_size=500, overlap=50):
     chunks = []
     start = 0
@@ -49,10 +33,7 @@ def chunk_text(text, chunk_size=500, overlap=50):
     return chunks
 
 
-# =========================
-# Process Documents
-# =========================
-
+## Process Documents
 for file in files:
     text = file.read_text(encoding="utf-8")
     chunks = chunk_text(text)
@@ -77,10 +58,7 @@ for file in files:
         print(f"\nChunk {i + 1}:")
         print(chunk)
 
-# =========================
-# Verify Database
-# =========================
-
+## Verify Database
 print(f"\nTotal chunks in ChromaDB: {collection.count()}")
 
 ## Query Knowledge Base
