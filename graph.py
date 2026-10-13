@@ -10,6 +10,8 @@ from langgraph.graph import StateGraph, START, END
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel
+from langgraph.types import interrupt
+from langgraph.types import Command
 
 ## LLM Setup
 load_dotenv()
@@ -21,6 +23,7 @@ class AgentState(TypedDict):
     answer: str
     needs_web_search: bool
     approved: bool
+    web_results: list
 
 
 ## Sufficiency Decision
@@ -34,6 +37,7 @@ tavily = TavilySearch(max_results=3)
 def web_search_tool(state: AgentState) -> dict:
     question = state["question"]
     response = tavily.invoke({"query": question})
+    print("Tavily Search Completed!")
     return {"web_results" : response}
 
 
@@ -43,6 +47,16 @@ llm = ChatGroq(
 )
 
 evaluator = llm.with_structured_output(SufficiencyDecision)
+
+## Rejection Node
+def rejection_node(state: AgentState) -> dict:
+    return {
+        "answer": (
+            "Web search was not approved. "
+            "I couldn't find enough information in the local knowledge base "
+            "to answer your question reliably."
+        )
+    }
     
 ## Retrieve Node
 async def retrieve_node(state: AgentState) -> dict:     
@@ -92,12 +106,51 @@ def evaluate_node(state: AgentState) -> dict:
 
     return {"needs_web_search": not response.sufficient}
 
-## Router
+## Router After Evaluation
 def route_after_evaluation(state: AgentState) -> str:
     if state["needs_web_search"]:
         return "approval"
+
     return "generate"
+
+## Router After Approval
+def route_after_approval(state: AgentState) -> str:
+    if state["approved"]:
+        return "web_search"
+
+    return "rejected"
     
+## Generate Web Answer Node
+def generate_web_answer_node(state: AgentState) -> dict:
+    question = state["question"]
+    web_results = state["web_results"]
+
+    response = llm.invoke([
+        (
+            "system",
+            "Answer the question using the provided web search results. "
+            "Be accurate and do not invent facts. If the results are "
+            "insufficient, say so. Include relevant source URLs when available."
+        ),
+        (
+            "human",
+            f"Question: {question}\n\nWeb search results:\n{web_results}"
+        )
+    ])
+
+    return {"answer": response.content}
+
+## Graph Builder
+builder = StateGraph(AgentState)
+
+## Approval Node
+def approval_node(state: AgentState) -> dict:
+    decision = interrupt(
+        "Knowledge is insufficient. Approve web search?"
+    )
+    
+    return {"approved": decision}
+
 ## Generate Node
 def generate_node(state: AgentState) -> dict:
     question = state["question"]
@@ -118,20 +171,15 @@ def generate_node(state: AgentState) -> dict:
 
     return {"answer": response.content}
 
-## Graph Builder
-builder = StateGraph(AgentState)
-
-## Approval Node
-def approval_node(state: AgentState) -> dict:
-    print("Knowledge insufficient — web search approval required")
-    return {}
-
 ## Graph Workflow 
 builder.add_node("retrieve", retrieve_node)
 builder.add_node("evaluate", evaluate_node)
 builder.add_node("generate", generate_node)
 builder.add_node("approval", approval_node)
 builder.add_node("web_search", web_search_tool)
+builder.add_node("rejected", rejection_node)
+builder.add_node("generate_web_answer", generate_web_answer_node)
+
 
 builder.add_edge(START, "retrieve")
 builder.add_edge("retrieve", "evaluate")
@@ -144,38 +192,65 @@ builder.add_conditional_edges(
         "approval": "approval"
     }
 )
-builder.add_edge("approval", "web_search")
-builder.add_edge("web_search", END)
+## Route After Approval
+builder.add_conditional_edges(
+    "approval",
+    route_after_approval,
+    {
+        "web_search": "web_search",
+        "rejected": "rejected"
+    }
+)
+builder.add_edge("web_search", "generate_web_answer")
+builder.add_edge("generate_web_answer", END)
+builder.add_edge("rejected", END)
 builder.add_edge("generate", END)
 
 ## Checkpointer
 memory = InMemorySaver()
 
 ## Compile Graph
-graph = builder.compile(
-    checkpointer=memory,
-    interrupt_before=["web_search"]
-    )
+graph = builder.compile(checkpointer=memory)
+
+## Run Graph
 
 ## Run Graph
 async def main():
     config = {"configurable": {"thread_id": "cortex-test-1"}}
-    result = await graph.ainvoke({
-        "question": "Who won the FIFA World Cup in 1962?",
-        "kb_results": [],
-        "answer": "",
-        "needs_web_search": False,
-        "approved": False,
-        "web_results": []
-    },
-        config = config                        
+
+    result = await graph.ainvoke(
+        {
+            "question": "Why does Cortex use ChromaDB?",
+            "kb_results": [],
+            "answer": "",
+            "needs_web_search": False,
+            "approved": False,
+            "web_results": []
+        },
+        config=config
     )
-    ## Check Graph State
+
+    ## Human Approval
     snapshot = graph.get_state(config)
 
-    print("Next node:", snapshot.next)
-    print("Current state:", snapshot.values)
+    if snapshot.next:
+        decision = input("Allow web search? (yes/no): ").strip().lower()
 
+        if decision == "yes":
+            result = await graph.ainvoke(
+                Command(resume=True),
+                config=config
+            )
+        else:
+            result = await graph.ainvoke(
+                Command(resume=False),
+                config=config
+            )
 
+    print("Sufficiency:", not result["needs_web_search"])
+    print("Approved:", result["approved"])
+    print("Answer:", result["answer"])
+
+    
 if __name__ == "__main__":
     asyncio.run(main())
