@@ -48,7 +48,11 @@ for file in files:
     collection.add(
         ids = ids,
         documents=chunks,
-        embeddings=embeddings.tolist()
+        embeddings=embeddings.tolist(),
+        metadatas=[
+        {"source": file.name, "chunk_index": i}
+        for i in range(len(chunks))
+    ]
     )
     print(f"Number of embeddings: {len(embeddings)}")
     print(f"Embedding dimensions: {len(embeddings[0])}")

@@ -14,7 +14,7 @@ mcp = FastMCP("Cortex Retriever")
 
 ## Retriever Tool
 @mcp.tool()
-def retrieve_documents(question: str) -> list[str]:
+def retrieve_documents(question: str) -> list[dict]:
     """searches Cortex's local knowledge base and returns the most relevant chunks for a question"""
     query_embedding = model.encode(question).tolist()
 
@@ -23,9 +23,21 @@ def retrieve_documents(question: str) -> list[str]:
         n_results= 3
     )
     
+    ids = results["ids"][0]
     documents = results["documents"][0]
+    metadatas = results["metadatas"][0]
     
-    return documents
+    retrieved_chunks = []
+    
+    for doc_id, document, metadata in zip(ids, documents, metadatas):
+        retrieved_chunks.append({
+        "id": doc_id,
+        "text": document,
+        "source": metadata["source"],
+        "chunk_index": metadata["chunk_index"]
+        })
+    
+    return retrieved_chunks
     
 if __name__ == "__main__":
     mcp.run()

@@ -9,7 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, START, END
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langgraph.types import interrupt
 from langgraph.types import Command
 
@@ -19,7 +19,7 @@ load_dotenv()
 ## Agent State
 class AgentState(TypedDict):
     question: str
-    kb_results: list[str]
+    kb_results: list[dict]
     answer: str
     needs_web_search: bool
     approved: bool
@@ -29,6 +29,14 @@ class AgentState(TypedDict):
 ## Sufficiency Decision
 class SufficiencyDecision(BaseModel):
     sufficient: bool
+    
+
+## Structured Response Schema
+class CortexResponse(BaseModel):
+    answer: str
+    citations: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
+
     
 ## Web Search Tool
 tavily = TavilySearch(max_results=3)
@@ -254,3 +262,17 @@ async def main():
     
 if __name__ == "__main__":
     asyncio.run(main())
+    
+
+## Temporary Structured Output Test
+test_llm = llm.with_structured_output(CortexResponse)
+
+test_response = test_llm.invoke(
+    "Explain in one sentence why Cortex uses ChromaDB. "
+    "Return one citation named 'cortex_overview.md' "
+    "and a confidence score of 0.95."
+)
+
+print(test_response)
+print(type(test_response))
+
