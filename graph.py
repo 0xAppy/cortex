@@ -24,6 +24,8 @@ class AgentState(TypedDict):
     needs_web_search: bool
     approved: bool
     web_results: list
+    citations: list[str]
+    confidence: float    
 
 
 ## Sufficiency Decision
@@ -45,7 +47,10 @@ tavily = TavilySearch(max_results=3)
 def web_search_tool(state: AgentState) -> dict:
     question = state["question"]
     response = tavily.invoke({"query": question})
+    
+    print("TAVILY RESULT FORMAT:", response)
     print("Tavily Search Completed!")
+    
     return {"web_results" : response}
 
 
@@ -98,6 +103,7 @@ async def retrieve_node(state: AgentState) -> dict:
 def evaluate_node(state: AgentState) -> dict:
     question = state["question"]
     kb_results = state["kb_results"]
+    kb_texts = [item["text"] for item in kb_results]
 
     response = evaluator.invoke([
         (
@@ -108,7 +114,7 @@ def evaluate_node(state: AgentState) -> dict:
         ),
         (
             "human",
-            f"Question: {question}\n\nKnowledge chunks:\n{kb_results}"
+            f"Question: {question}\n\nKnowledge chunks:\n{kb_texts}"
         )
     ])
 
@@ -132,13 +138,20 @@ def route_after_approval(state: AgentState) -> str:
 def generate_web_answer_node(state: AgentState) -> dict:
     question = state["question"]
     web_results = state["web_results"]
+    allowed_urls = [
+        item["url"]
+        for item in web_results["results"]
+        if "url" in item
+    ]
 
-    response = llm.invoke([
+    response = structured_llm.invoke([
         (
             "system",
-            "Answer the question using the provided web search results. "
+            "Answer the question using only the provided web search results. "
             "Be accurate and do not invent facts. If the results are "
-            "insufficient, say so. Include relevant source URLs when available."
+            "insufficient, say so. For citations, use only URLs explicitly "
+            "present in the provided results. Never invent or modify a URL. "
+            "Return a confidence score between 0.0 and 1.0."
         ),
         (
             "human",
@@ -146,7 +159,16 @@ def generate_web_answer_node(state: AgentState) -> dict:
         )
     ])
 
-    return {"answer": response.content}
+    valid_citations = [
+        url for url in response.citations
+        if url in allowed_urls
+    ]
+
+    return {
+        "answer": response.answer,
+        "citations": valid_citations,
+        "confidence": response.confidence
+    }
 
 ## Graph Builder
 builder = StateGraph(AgentState)
@@ -159,12 +181,16 @@ def approval_node(state: AgentState) -> dict:
     
     return {"approved": decision}
 
+
 ## Generate Node
+structured_llm = llm.with_structured_output(CortexResponse)
 def generate_node(state: AgentState) -> dict:
     question = state["question"]
     kb_results = state["kb_results"]
+    kb_citations = [item["id"] for item in kb_results]
+    kb_texts = [item["text"] for item in kb_results]
 
-    response = llm.invoke([
+    response = structured_llm.invoke([
         (
             "system",
             "Answer the question using only the provided knowledge chunks. "
@@ -173,11 +199,13 @@ def generate_node(state: AgentState) -> dict:
         ),
         (
             "human",
-            f"Question: {question}\n\nKnowledge chunks:\n{kb_results}"
+            f"Question: {question}\n\nKnowledge chunks:\n{kb_texts}"
         )
     ])
 
-    return {"answer": response.content}
+    return {"answer": response.answer,
+            "citations": kb_citations,
+            "confidence": response.confidence}
 
 ## Graph Workflow 
 builder.add_node("retrieve", retrieve_node)
@@ -228,7 +256,7 @@ async def main():
 
     result = await graph.ainvoke(
         {
-            "question": "Why does Cortex use ChromaDB?",
+            "question": "Who won the FIFA World Cup in 1962?",
             "kb_results": [],
             "answer": "",
             "needs_web_search": False,
@@ -258,21 +286,13 @@ async def main():
     print("Sufficiency:", not result["needs_web_search"])
     print("Approved:", result["approved"])
     print("Answer:", result["answer"])
+    
+    print("Citations:", result.get("citations", []))
+    print("Confidence:", result.get("confidence", 0.0))
 
     
 if __name__ == "__main__":
     asyncio.run(main())
     
 
-## Temporary Structured Output Test
-test_llm = llm.with_structured_output(CortexResponse)
-
-test_response = test_llm.invoke(
-    "Explain in one sentence why Cortex uses ChromaDB. "
-    "Return one citation named 'cortex_overview.md' "
-    "and a confidence score of 0.95."
-)
-
-print(test_response)
-print(type(test_response))
 
